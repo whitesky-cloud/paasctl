@@ -67,19 +67,19 @@ var deleteCmd = &cobra.Command{
 				continue
 			}
 			if err := ws.DeleteLoadBalancer(lb.ID); err != nil {
-				warnings = append(warnings, warnf("failed to delete load balancer %s: %v", lb.ID, err))
+				warnings = append(warnings, warnf("failed to delete legacy load balancer %s: %v", lb.ID, err))
 			}
 		}
 
 		if dep.ServerPoolID != "" && dep.ServerPoolHostID != "" {
 			if err := ws.RemoveHostFromServerPool(dep.ServerPoolID, dep.ServerPoolHostID); err != nil {
-				warnings = append(warnings, warnf("failed to remove server pool host %s: %v", dep.ServerPoolHostID, err))
+				warnings = append(warnings, warnf("failed to remove legacy server pool host %s: %v", dep.ServerPoolHostID, err))
 			}
 		}
 
 		if dep.ServerPoolID != "" {
 			if err := ws.DeleteServerPool(dep.ServerPoolID); err != nil {
-				warnings = append(warnings, warnf("failed to delete server pool %s: %v", dep.ServerPoolID, err))
+				warnings = append(warnings, warnf("failed to delete legacy server pool %s: %v", dep.ServerPoolID, err))
 			}
 		}
 

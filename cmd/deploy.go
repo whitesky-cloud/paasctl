@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -115,12 +113,7 @@ var deployCmd = &cobra.Command{
 		}
 
 		stepNum := 0
-		lbDisplay := newLoadBalancerWaitDisplay(!outputJSON)
-		defer lbDisplay.Stop()
 		dep, err := deployer.Deploy(plan, func(message string) {
-			if lbDisplay.Handle(message) {
-				return
-			}
 			stepNum++
 			if !outputJSON {
 				fmt.Printf("[%d] %s...\n", stepNum, message)
@@ -129,7 +122,6 @@ var deployCmd = &cobra.Command{
 		if err != nil {
 			failf("deploy failed: %v", err)
 		}
-		lbDisplay.Stop()
 		if outputJSON {
 			printJSONOK(map[string]interface{}{
 				"deployment": dep,
@@ -143,11 +135,8 @@ var deployCmd = &cobra.Command{
 
 		fmt.Printf("Deployment created: %s\n", dep.Name)
 		fmt.Printf("VM ID: %d\n", dep.VMID)
-		if dep.ServerPoolID != "" {
-			fmt.Printf("Server pool: %s (host: %s)\n", dep.ServerPoolID, dep.ServerPoolHostID)
-		}
-		for _, lb := range dep.LoadBalancers {
-			fmt.Printf("Load balancer: %s local %d -> public %d (%s)\n", lb.ID, lb.LocalPort, lb.PublicPort, lb.Protocol)
+		for _, pf := range dep.PortForwards {
+			fmt.Printf("Port forward: %s local %d -> public %d (%s)\n", pf.ID, pf.LocalPort, pf.PublicPort, pf.Protocol)
 		}
 		if dep.Domain != "" {
 			fmt.Printf("Domain: %s\n", dep.Domain)
@@ -200,24 +189,22 @@ func printPlan(plan runtime.DeployPlan) {
 	fmt.Println("1. Create VM")
 	if plan.ExternalNetworkID != "" && plan.ExternalNetworkIP != "" {
 		fmt.Println("2. Add extra cloudspace external network IP")
-		fmt.Println("3. Create server pool and attach VM as backend host")
-		fmt.Println("4. Create TCP load balancers for required ports")
-		fmt.Println("5. Wait for SSH through load balancer")
-		fmt.Printf("6. Authorize %s SSH access (bootstrap command)\n", plan.Provider)
-		fmt.Printf("7. Trigger %s app/service deployment\n", plan.Provider)
-		fmt.Printf("8. Add custom domain to %s service\n", plan.Provider)
-		fmt.Println("9. Save deployment metadata note")
-		fmt.Println("10. Rollback all created resources if any step fails")
+		fmt.Println("3. Create port forwards for required ports")
+		fmt.Println("4. Wait for SSH through port forward")
+		fmt.Printf("5. Authorize %s SSH access (bootstrap command)\n", plan.Provider)
+		fmt.Printf("6. Trigger %s app/service deployment\n", plan.Provider)
+		fmt.Printf("7. Add custom domain to %s service\n", plan.Provider)
+		fmt.Println("8. Save deployment metadata note")
+		fmt.Println("9. Rollback all created resources if any step fails")
 		return
 	}
-	fmt.Println("2. Create server pool and attach VM as backend host")
-	fmt.Println("3. Create TCP load balancers for required ports")
-	fmt.Println("4. Wait for SSH through load balancer")
-	fmt.Printf("5. Authorize %s SSH access (bootstrap command)\n", plan.Provider)
-	fmt.Printf("6. Trigger %s app/service deployment\n", plan.Provider)
-	fmt.Printf("7. Add custom domain to %s service\n", plan.Provider)
-	fmt.Println("8. Save deployment metadata note")
-	fmt.Println("9. Rollback all created resources if any step fails")
+	fmt.Println("2. Create port forwards for required ports")
+	fmt.Println("3. Wait for SSH through port forward")
+	fmt.Printf("4. Authorize %s SSH access (bootstrap command)\n", plan.Provider)
+	fmt.Printf("5. Trigger %s app/service deployment\n", plan.Provider)
+	fmt.Printf("6. Add custom domain to %s service\n", plan.Provider)
+	fmt.Println("7. Save deployment metadata note")
+	fmt.Println("8. Rollback all created resources if any step fails")
 }
 
 func confirmPlanApproval() bool {
@@ -237,177 +224,6 @@ func joinMappings(mappings []runtime.PortMapping) string {
 		parts = append(parts, fmt.Sprintf("%d->%d", m.LocalPort, m.PublicPort))
 	}
 	return strings.Join(parts, ", ")
-}
-
-type loadBalancerWaitDisplay struct {
-	enabled      bool
-	host         string
-	order        []int
-	items        map[int]lbWaitItem
-	lines        int
-	spinIndex    int
-	tickerStop   chan struct{}
-	renderActive bool
-	mu           sync.Mutex
-}
-
-type lbWaitItem struct {
-	ID         string
-	LocalPort  int
-	PublicPort int
-	Ready      bool
-}
-
-func newLoadBalancerWaitDisplay(enabled bool) *loadBalancerWaitDisplay {
-	return &loadBalancerWaitDisplay{
-		enabled:    enabled,
-		items:      make(map[int]lbWaitItem),
-		tickerStop: make(chan struct{}),
-	}
-}
-
-func (d *loadBalancerWaitDisplay) Handle(message string) bool {
-	if !strings.HasPrefix(message, "__lbwait_") {
-		return false
-	}
-
-	switch {
-	case strings.HasPrefix(message, "__lbwait_start__|"):
-		d.start(strings.TrimPrefix(message, "__lbwait_start__|"))
-	case strings.HasPrefix(message, "__lbwait_ready__|"):
-		port, _ := strconv.Atoi(strings.TrimPrefix(message, "__lbwait_ready__|"))
-		d.markReady(port)
-	}
-	return true
-}
-
-func (d *loadBalancerWaitDisplay) start(payload string) {
-	if !d.enabled {
-		return
-	}
-
-	parts := strings.SplitN(payload, "|", 2)
-	if len(parts) != 2 {
-		return
-	}
-
-	host := strings.TrimSpace(parts[0])
-	itemSpecs := strings.Split(parts[1], ";")
-
-	d.mu.Lock()
-	d.host = host
-	d.order = d.order[:0]
-	d.items = make(map[int]lbWaitItem)
-	for _, spec := range itemSpecs {
-		fields := strings.Split(spec, ",")
-		if len(fields) != 3 {
-			continue
-		}
-		localPort, errLocal := strconv.Atoi(fields[1])
-		publicPort, errPublic := strconv.Atoi(fields[2])
-		if errLocal != nil || errPublic != nil || publicPort <= 0 {
-			continue
-		}
-		d.order = append(d.order, publicPort)
-		d.items[publicPort] = lbWaitItem{
-			ID:         fields[0],
-			LocalPort:  localPort,
-			PublicPort: publicPort,
-		}
-	}
-	sort.Ints(d.order)
-	shouldStartTicker := !d.renderActive
-	d.renderActive = true
-	d.mu.Unlock()
-
-	d.render()
-
-	if shouldStartTicker {
-		go d.spin()
-	}
-}
-
-func (d *loadBalancerWaitDisplay) markReady(publicPort int) {
-	if !d.enabled || publicPort <= 0 {
-		return
-	}
-
-	d.mu.Lock()
-	item, ok := d.items[publicPort]
-	if ok {
-		item.Ready = true
-		d.items[publicPort] = item
-	}
-	d.mu.Unlock()
-	d.render()
-}
-
-func (d *loadBalancerWaitDisplay) spin() {
-	ticker := time.NewTicker(120 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.mu.Lock()
-			active := d.renderActive
-			d.spinIndex++
-			d.mu.Unlock()
-			if active {
-				d.render()
-			}
-		case <-d.tickerStop:
-			return
-		}
-	}
-}
-
-func (d *loadBalancerWaitDisplay) Stop() {
-	if !d.enabled {
-		return
-	}
-	d.mu.Lock()
-	d.renderActive = false
-	d.mu.Unlock()
-	select {
-	case <-d.tickerStop:
-	default:
-		close(d.tickerStop)
-	}
-}
-
-func (d *loadBalancerWaitDisplay) render() {
-	if !d.enabled {
-		return
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if len(d.order) == 0 {
-		return
-	}
-
-	if d.lines > 0 {
-		fmt.Printf("\x1b[%dA", d.lines)
-	}
-
-	spinnerFrames := []rune{'|', '/', '-', '\\'}
-	frame := spinnerFrames[d.spinIndex%len(spinnerFrames)]
-
-	lineCount := 0
-	fmt.Printf("Waiting for TCP load balancers to accept connections on %s:\n", d.host)
-	lineCount++
-	for _, publicPort := range d.order {
-		item := d.items[publicPort]
-		status := string(frame)
-		if item.Ready {
-			status = "✔"
-		}
-		fmt.Printf("  %s public %d -> local %d (load balancer %s)\n", status, item.PublicPort, item.LocalPort, item.ID)
-		lineCount++
-	}
-	d.lines = lineCount
 }
 
 func deploymentNextStepNote(cfg config.Config, dep deployments.Deployment) string {

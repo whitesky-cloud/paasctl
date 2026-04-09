@@ -238,57 +238,25 @@ func (d *Deployer) Deploy(plan DeployPlan, progress func(string)) (dep deploymen
 		})
 	}
 
-	step(progress, "Waiting for VM private IP")
-	privateIP, ipErr := d.waitForVMPrivateIP(vmID, 2*time.Minute)
-	if ipErr != nil {
-		return dep, runRollback(ipErr)
-	}
-
-	serverPoolName := fmt.Sprintf("paasctl-%s", plan.Name)
-	step(progress, "Creating ingress server pool")
-	serverPoolID, spErr := d.WhiteSky.CreateServerPool(serverPoolName, "Managed by paasctl")
-	if spErr != nil {
-		return dep, runRollback(fmt.Errorf("create server pool failed: %w", spErr))
-	}
-	rollbacks = append(rollbacks, rollbackAction{
-		name: "delete server pool",
-		fn: func() error {
-			return d.WhiteSky.DeleteServerPool(serverPoolID)
-		},
-	})
-
-	step(progress, fmt.Sprintf("Adding VM host %s to server pool", privateIP))
-	hostID, hostErr := d.WhiteSky.AddHostToServerPool(serverPoolID, privateIP)
-	if hostErr != nil {
-		return dep, runRollback(fmt.Errorf("add host to server pool failed: %w", hostErr))
-	}
-	rollbacks = append(rollbacks, rollbackAction{
-		name: "remove host from server pool",
-		fn: func() error {
-			return d.WhiteSky.RemoveHostFromServerPool(serverPoolID, hostID)
-		},
-	})
-
-	step(progress, "Creating TCP load balancers")
-	lbRefs := make([]deployments.LoadBalancerRef, 0, len(plan.PortMappings))
+	step(progress, "Creating port forwards")
+	pfRefs := make([]deployments.PortForwardRef, 0, len(plan.PortMappings))
 	for _, pm := range plan.PortMappings {
-		lbName := fmt.Sprintf("paasctl-%s-%d", plan.Name, pm.PublicPort)
-		lbID, lbErr := d.WhiteSky.CreateTCPLoadBalancer(lbName, "Managed by paasctl", serverPoolID, pm.PublicPort, pm.LocalPort, plan.PublicIPAddress)
-		if lbErr != nil {
-			return dep, runRollback(fmt.Errorf("create load balancer for %d->%d failed: %w", pm.PublicPort, pm.LocalPort, lbErr))
+		pfID, pfErr := d.WhiteSky.CreatePortForward(pm.LocalPort, pm.PublicPort, vmID, plan.PublicIPAddress, "tcp")
+		if pfErr != nil {
+			return dep, runRollback(fmt.Errorf("create portforward for %d->%d failed: %w", pm.PublicPort, pm.LocalPort, pfErr))
 		}
-		lbIDCopy := lbID
+		pfIDCopy := pfID
 		rollbacks = append(rollbacks, rollbackAction{
-			name: fmt.Sprintf("delete load balancer %s", lbName),
+			name: fmt.Sprintf("delete portforward %d->%d", pm.PublicPort, pm.LocalPort),
 			fn: func() error {
-				return d.WhiteSky.DeleteLoadBalancer(lbIDCopy)
+				return d.WhiteSky.DeletePortForward(pfIDCopy)
 			},
 		})
-		lbRefs = append(lbRefs, deployments.LoadBalancerRef{
-			ID:         lbID,
-			Name:       lbName,
+		pfRefs = append(pfRefs, deployments.PortForwardRef{
+			ID:         pfID,
 			LocalPort:  pm.LocalPort,
 			PublicPort: pm.PublicPort,
+			PublicIP:   plan.PublicIPAddress,
 			Protocol:   "tcp",
 		})
 	}
@@ -357,9 +325,7 @@ func (d *Deployer) Deploy(plan DeployPlan, progress func(string)) (dep deploymen
 		TemplateVersion:     plan.TemplateVersion,
 		VMID:                vmID,
 		BootstrapCommand:    plan.BootstrapCommand,
-		ServerPoolID:        serverPoolID,
-		ServerPoolHostID:    hostID,
-		LoadBalancers:       lbRefs,
+		PortForwards:        pfRefs,
 		PublicIPAddress:     plan.PublicIPAddress,
 		ExternalNetworkID:   plan.ExternalNetworkID,
 		ExternalNetworkIP:   plan.ExternalNetworkIP,
@@ -382,20 +348,6 @@ func (d *Deployer) Deploy(plan DeployPlan, progress func(string)) (dep deploymen
 	}
 
 	return dep, nil
-}
-
-func (d *Deployer) waitForVMPrivateIP(vmID int, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		vm, err := d.WhiteSky.GetVM(vmID)
-		if err == nil {
-			if ip := privateIPv4FromVM(vm); ip != "" {
-				return ip, nil
-			}
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return "", fmt.Errorf("timeout after %s while waiting for VM private IP", timeout)
 }
 
 func (d *Deployer) waitForVMAgentAndRunBootstrap(vmID int, command string, timeout time.Duration) error {

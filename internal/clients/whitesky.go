@@ -404,6 +404,53 @@ func (c *WhiteSkyClient) ListPortForwards() ([]PortForward, error) {
 	return resp.Result, nil
 }
 
+func (c *WhiteSkyClient) CreatePortForward(localPort, publicPort, vmID int, publicIP, protocol string) (string, error) {
+	if localPort <= 0 {
+		return "", fmt.Errorf("invalid local port")
+	}
+	if publicPort <= 0 {
+		return "", fmt.Errorf("invalid public port")
+	}
+	if vmID <= 0 {
+		return "", fmt.Errorf("invalid vm id")
+	}
+	proto := strings.ToLower(strings.TrimSpace(protocol))
+	if proto == "" {
+		proto = "tcp"
+	}
+	if proto != "tcp" && proto != "udp" {
+		return "", fmt.Errorf("invalid protocol %q", protocol)
+	}
+
+	query := map[string]string{
+		"local_port":  strconv.Itoa(localPort),
+		"public_port": strconv.Itoa(publicPort),
+		"vm_id":       strconv.Itoa(vmID),
+		"protocol":    proto,
+	}
+	if strings.TrimSpace(publicIP) != "" {
+		query["public_ip"] = strings.TrimSpace(publicIP)
+	}
+
+	var resp struct {
+		ID            string `json:"id"`
+		PortforwardID string `json:"portforward_id"`
+	}
+	if err := c.http.DoJSON("POST", c.path("/portforwards"), query, nil, &resp); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(resp.PortforwardID) != "" {
+		return resp.PortforwardID, nil
+	}
+	if strings.TrimSpace(resp.ID) != "" {
+		return resp.ID, nil
+	}
+	if resp.ID == "" {
+		return "", fmt.Errorf("create portforward returned empty id")
+	}
+	return resp.ID, nil
+}
+
 func (c *WhiteSkyClient) DeletePortForward(portforwardID string) error {
 	return c.http.DoJSON("DELETE", c.path("/portforwards/%s", portforwardID), nil, nil, nil)
 }

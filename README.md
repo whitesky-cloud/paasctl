@@ -131,15 +131,15 @@ paas-providers:
    - exposed ports
 2. If `--image-id` is not provided, queries whitesky.cloud images in the cloudspace location and auto-selects Ubuntu `24.04` (fallback `22.04`).
 3. Checks required public ports before doing any changes (against existing portforwards, reverse proxies, and load balancers).
-4. If required ports conflict on the cloudspace primary public IP, plans an extra external public IP and binds new load balancers to that IP.
+4. If required ports conflict on the cloudspace primary public IP, plans an extra external public IP and binds new port forwards to that IP.
 5. Prints a deploy plan and asks for approval (unless `--no-plan-approval`).
 6. Uses separate timeouts for infrastructure and provider readiness:
    `--timeout` defaults to `10m` for VM, SSH, and bootstrap readiness.
    `--provider-timeout` defaults to `6h` for long-running provider deployments such as Elestio application installation.
 7. Creates a VM in whitesky.cloud.
 8. Adds the extra external network IP when planned.
-9. Creates ingress server pool + host and TCP load balancers (instead of portforwards).
-10. Waits until SSH endpoint is reachable through the load balancer.
+9. Creates direct TCP port forwards for the required ports.
+10. Waits until the SSH endpoint is reachable through the port forward.
 11. Executes bootstrap command inside the VM (`/vms/{vm_id}/exec`) to authorize provider SSH access.
 12. Calls the provider implementation to create the service. For Elestio this authenticates, tests BYOVM connectivity (`/api/servers/getBYOVM`), and creates the service (`/api/servers/createServer`).
 13. Selects a preferred customer top-level domain in whitesky.cloud (prefers customer-owned domain over VCO-provided domain when both exist).
@@ -165,6 +165,9 @@ export PAASCTL_WHITESKY_REQUEST_TIMEOUT="300s"
 
 # Build
 go build -o paasctl .
+
+# Show version
+./paasctl version
 
 # Deploy template id 14
 ./paasctl --cloudspace prod --log-api deploy --provider elestio --name wordpress-prod --template-id 14 --vcpus 2 --memory 4096 --ssh-public-port 2222
