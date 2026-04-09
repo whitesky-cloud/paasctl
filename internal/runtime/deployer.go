@@ -301,21 +301,6 @@ func (d *Deployer) Deploy(plan DeployPlan, progress func(string)) (dep deploymen
 		return dep, runRollback(fmt.Errorf("failed to add domain to whitesky.cloud DNS: %w", dnsErr))
 	}
 
-	step(progress, fmt.Sprintf("Adding domain %s to %s service", customDomain, d.Provider.Name()))
-	providerDep := deployments.Deployment{
-		Name:              plan.Name,
-		Provider:          d.Provider.Name(),
-		ProviderProjectID: service.ProjectID,
-		ProviderServiceID: service.ServiceID,
-	}
-	if d.Provider.Name() == providers.ElestioName {
-		providerDep.ElestioProjectID = service.ProjectID
-		providerDep.ElestioServerID = service.ServiceID
-	}
-	if domainErr := d.Provider.AddDomain(providerDep, customDomain); domainErr != nil {
-		return dep, runRollback(fmt.Errorf("failed to add domain to %s service: %w", d.Provider.Name(), domainErr))
-	}
-
 	step(progress, "Saving deployment metadata to cloudspace notes")
 	dep = deployments.Deployment{
 		Name:                plan.Name,
@@ -345,6 +330,11 @@ func (d *Deployer) Deploy(plan DeployPlan, progress func(string)) (dep deploymen
 	step(progress, fmt.Sprintf("Waiting for %s service deployment to complete", d.Provider.Name()))
 	if waitErr := d.Provider.WaitUntilReady(dep, plan.ProviderTimeout, progress); waitErr != nil {
 		return dep, fmt.Errorf("%s service did not become ready within %s: %w", d.Provider.Name(), plan.ProviderTimeout, waitErr)
+	}
+
+	step(progress, fmt.Sprintf("Adding domain %s to %s service", customDomain, d.Provider.Name()))
+	if domainErr := d.Provider.AddDomain(dep, customDomain); domainErr != nil {
+		return dep, fmt.Errorf("failed to add domain to %s service after deployment became ready: %w", d.Provider.Name(), domainErr)
 	}
 
 	return dep, nil
